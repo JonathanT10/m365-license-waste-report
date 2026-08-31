@@ -23,6 +23,14 @@
 .PARAMETER CsvPath
     Optional path for a CSV export of the per-user reclaim candidates.
 
+.PARAMETER ConsumptionSkuThreshold
+    SKUs with this many (or more) prepaid units are treated as self-service /
+    consumption / viral SKUs (Power Apps Dev, Flow Free, PSTN consumption,
+    Forms Pro trials...) - Microsoft reports those with 10,000+ fake "seats",
+    which would drown the real waste numbers. They are listed separately and
+    excluded from the totals. Default: 10000. Raise it if your org genuinely
+    buys 10k+ seats of something.
+
 .EXAMPLE
     .\Get-LicenseWasteReport.ps1
 
@@ -48,7 +56,8 @@
 [CmdletBinding()]
 param(
     [ValidateRange(1, 3650)][int]$StaleDays = 90,
-    [string]$CsvPath
+    [string]$CsvPath,
+    [ValidateRange(100, 100000000)][int]$ConsumptionSkuThreshold = 10000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,8 +99,11 @@ $skuRows = foreach ($s in $skus) {
         Assigned   = $s.ConsumedUnits
         Unassigned = [Math]::Max(0, $purchased - $s.ConsumedUnits)
         SuspendedOrWarning = $suspended
+        IsConsumption      = ($purchased -ge $ConsumptionSkuThreshold)
     }
 }
+$countedSkuRows     = @($skuRows | Where-Object { -not $_.IsConsumption })
+$consumptionSkuRows = @($skuRows | Where-Object { $_.IsConsumption })
 #endregion
 
 #region 2 + 3. Per-user reclaim candidates
@@ -135,9 +147,16 @@ Write-Host '===================== LICENSE WASTE REPORT ====================='
 Write-Host ("  Licensed users: {0}    Stale threshold: {1} days" -f @($licensedUsers).Count, $StaleDays)
 Write-Host ''
 Write-Host '  --- Seats purchased vs assigned (per SKU) ---'
-$skuRows | Sort-Object Unassigned -Descending | ForEach-Object {
+$countedSkuRows | Sort-Object Unassigned -Descending | ForEach-Object {
     $flag = if ($_.Unassigned -gt 0) { ' <-- unassigned seats' } else { '' }
     Write-Host ("    {0}: {1} purchased / {2} assigned / {3} unassigned{4}" -f $_.Sku, $_.Purchased, $_.Assigned, $_.Unassigned, $flag)
+}
+if ($consumptionSkuRows.Count) {
+    Write-Host ''
+    Write-Host ("  --- Self-service / consumption SKUs (excluded from totals; threshold {0}) ---" -f $ConsumptionSkuThreshold)
+    $consumptionSkuRows | Sort-Object Sku | ForEach-Object {
+        Write-Host ("    {0}: {1} in use" -f $_.Sku, $_.Assigned)
+    }
 }
 Write-Host ''
 $disabled = @($reclaimCandidates | Where-Object Reason -eq 'DISABLED ACCOUNT')
@@ -150,7 +169,8 @@ if ($signInDataAvailable) {
     $stale | ForEach-Object { Write-Host ("    {0} <{1}>  last: {2}  [{3}]" -f $_.DisplayName, $_.UserPrincipalName, $(if ($_.LastSignIn) { $_.LastSignIn } else { 'never' }), $_.Licenses) }
 }
 Write-Host ''
-$totalUnassigned = ($skuRows | Measure-Object Unassigned -Sum).Sum
+$totalUnassigned = ($countedSkuRows | Measure-Object Unassigned -Sum).Sum
+if ($null -eq $totalUnassigned) { $totalUnassigned = 0 }
 Write-Host ("  TOTALS: {0} unassigned seat(s), {1} license-holding disabled account(s), {2} stale candidate(s)" -f $totalUnassigned, $disabled.Count, $stale.Count)
 Write-Host '  Multiply by your per-seat prices for the renewal conversation.'
 Write-Host '================================================================='
@@ -165,7 +185,8 @@ if ($CsvPath) {
 [pscustomobject]@{
     GeneratedUtc      = (Get-Date).ToUniversalTime().ToString('o')
     StaleDays         = $StaleDays
-    SkuSummary        = $skuRows
+    SkuSummary        = $countedSkuRows
+    ConsumptionSkus   = $consumptionSkuRows
     ReclaimCandidates = $reclaimCandidates
 }
 #endregion

@@ -43,6 +43,8 @@ The script connects on its own if you haven't.
 ## Notes and caveats
 
 - **Read-only.** The script changes nothing — it reports. Reclaiming is your call.
+- **Run against a real production tenant** (200+ licensed users) — the numbers below are the shape of what it finds.
+- **Self-service and consumption SKUs are separated out.** Microsoft reports Power Apps Dev, Flow Free, PSTN consumption and similar with 10,000 — or 10,000,000 — nominal "seats". Left in the math they produce nonsense totals like "13 million unassigned seats", so anything at or above `-ConsumptionSkuThreshold` (default 10,000) is listed in its own section and excluded from the totals. Raise the threshold if your org genuinely buys 10k+ seats of something.
 - Last-sign-in data (`SignInActivity`) requires Entra ID P1/P2 in the tenant. Without it, the stale-user check is skipped with a warning; the other two checks still work.
 - Sign-in timestamps can lag by up to 24 hours, and "stale" is a conversation starter, not a verdict — a licensed account with no sign-ins might be a service account doing its job. Check before you cut.
 - Disabled accounts holding licenses aren't always waste either — a mailbox mid-conversion to shared still needs its license briefly. See [entra-lifecycle-toolkit](https://github.com/JonathanT10/entra-lifecycle-toolkit) for the offboarding flow that avoids that trap.
