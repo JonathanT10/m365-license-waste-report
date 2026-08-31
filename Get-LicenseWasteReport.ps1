@@ -23,6 +23,11 @@
 .PARAMETER CsvPath
     Optional path for a CSV export of the per-user reclaim candidates.
 
+.PARAMETER JsonPath
+    Optional path for a JSON export of the whole result - per-SKU summary,
+    consumption SKUs, and reclaim candidates. This is the machine-readable
+    feed (it-ops-console reads it).
+
 .PARAMETER ConsumptionSkuThreshold
     SKUs with this many (or more) prepaid units are treated as self-service /
     consumption / viral SKUs (Power Apps Dev, Flow Free, PSTN consumption,
@@ -57,6 +62,7 @@
 param(
     [ValidateRange(1, 3650)][int]$StaleDays = 90,
     [string]$CsvPath,
+    [string]$JsonPath,
     [ValidateRange(100, 100000000)][int]$ConsumptionSkuThreshold = 10000
 )
 
@@ -182,11 +188,19 @@ if ($CsvPath) {
 }
 
 # Structured result for pipelines
-[pscustomobject]@{
-    GeneratedUtc      = (Get-Date).ToUniversalTime().ToString('o')
+$result = [pscustomobject]@{
+    GeneratedUtc      = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     StaleDays         = $StaleDays
+    LicensedUsers     = @($licensedUsers).Count
     SkuSummary        = $countedSkuRows
     ConsumptionSkus   = $consumptionSkuRows
     ReclaimCandidates = $reclaimCandidates
 }
+
+if ($JsonPath) {
+    $result | ConvertTo-Json -Depth 6 | Set-Content -Path $JsonPath -Encoding UTF8
+    Write-Host "Full result exported to: $JsonPath"
+}
+
+$result
 #endregion
