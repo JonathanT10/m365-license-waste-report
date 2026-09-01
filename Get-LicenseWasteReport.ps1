@@ -36,6 +36,22 @@
     excluded from the totals. Default: 10000. Raise it if your org genuinely
     buys 10k+ seats of something.
 
+.PARAMETER PriceList
+    Optional path to an INI of per-seat monthly prices, so the report can put
+    a dollar figure on the waste instead of just a seat count. Format:
+
+        [settings]
+        currency = $           ; prefix shown before amounts (default: $)
+        [prices]
+        SPB            = 33.00 ; the SKU name on the left is the SkuPartNumber
+        AAD_PREMIUM_P2 = 9.00  ; this report already prints in its SKU summary
+
+    Only the SKUs you price get a dollar figure; the rest still show their
+    seat counts. From the priced SKUs the report computes two numbers:
+    money sitting in unassigned seats, and money tied up in the licenses that
+    disabled or stale accounts still hold (reclaimable now). With no
+    -PriceList, nothing about money appears and everything else is unchanged.
+
 .EXAMPLE
     .\Get-LicenseWasteReport.ps1
 
@@ -63,10 +79,40 @@ param(
     [ValidateRange(1, 3650)][int]$StaleDays = 90,
     [string]$CsvPath,
     [string]$JsonPath,
-    [ValidateRange(100, 100000000)][int]$ConsumptionSkuThreshold = 10000
+    [ValidateRange(100, 100000000)][int]$ConsumptionSkuThreshold = 10000,
+    [string]$PriceList
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Read-PriceList {
+    # Tiny INI reader for the price file: [prices] SKU = number, plus an
+    # optional [settings] currency = <prefix>. Blank/comment (# or ;) lines and
+    # non-numeric values are skipped, so a half-filled template is harmless.
+    param([string]$Path)
+    $out = [ordered]@{ Currency = '$'; Prices = @{} }
+    if (-not $Path -or -not (Test-Path $Path)) { return $out }
+    $section = ''
+    foreach ($raw in Get-Content -LiteralPath $Path) {
+        $line = $raw.Trim()
+        if ($line -eq '' -or $line[0] -eq '#' -or $line[0] -eq ';') { continue }
+        if ($line -match '^\[(.+)\]$') { $section = $Matches[1].Trim().ToLowerInvariant(); continue }
+        $eq = $line.IndexOf('=')
+        if ($eq -lt 1) { continue }
+        $key = $line.Substring(0, $eq).Trim()
+        $val = $line.Substring($eq + 1).Trim()
+        # Drop an inline comment after the value (e.g. "33.00 ; E3").
+        $val = ($val -split '\s+[;#]', 2)[0].Trim()
+        if ($section -eq 'settings' -and $key.ToLowerInvariant() -eq 'currency') {
+            if ($val) { $out.Currency = $val }
+        }
+        elseif ($section -eq 'prices') {
+            $num = 0.0
+            if ([double]::TryParse($val, [ref]$num)) { $out.Prices[$key] = $num }
+        }
+    }
+    return $out
+}
 
 if (-not (Get-MgContext)) {
     Connect-MgGraph -Scopes 'User.Read.All','Organization.Read.All','AuditLog.Read.All' -NoWelcome
@@ -178,7 +224,60 @@ Write-Host ''
 $totalUnassigned = ($countedSkuRows | Measure-Object Unassigned -Sum).Sum
 if ($null -eq $totalUnassigned) { $totalUnassigned = 0 }
 Write-Host ("  TOTALS: {0} unassigned seat(s), {1} license-holding disabled account(s), {2} stale candidate(s)" -f $totalUnassigned, $disabled.Count, $stale.Count)
-Write-Host '  Multiply by your per-seat prices for the renewal conversation.'
+
+# --- Costing: put a dollar figure on the waste, if a price list was given --- #
+# Only SKUs with a price get a figure; the report multiplies here so the
+# renewal conversation does not have to. Two numbers: money in unassigned
+# seats, and money in the licenses that disabled/stale accounts still hold.
+$priceListProvided = [bool]$PriceList -and (Test-Path $PriceList)
+$priceData = Read-PriceList $PriceList
+$prices = $priceData.Prices
+$costing = $null
+if ($priceListProvided) {
+    $pricedCount = 0
+    foreach ($row in $countedSkuRows) {
+        $price = if ($prices.ContainsKey($row.Sku)) { [double]$prices[$row.Sku] } else { $null }
+        if ($null -ne $price) { $pricedCount++ }
+        $unusedCost = if ($null -ne $price) { [math]::Round($price * [int]$row.Unassigned, 2) } else { $null }
+        $row | Add-Member -NotePropertyName MonthlyPrice -NotePropertyValue $price -Force
+        $row | Add-Member -NotePropertyName UnusedMonthlyCost -NotePropertyValue $unusedCost -Force
+    }
+    foreach ($c in $reclaimCandidates) {
+        $skuList = @("$($c.Licenses)" -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $sum = 0.0; $anyPriced = $false
+        foreach ($s in $skuList) { if ($prices.ContainsKey($s)) { $sum += [double]$prices[$s]; $anyPriced = $true } }
+        $cost = if ($anyPriced) { [math]::Round($sum, 2) } else { $null }
+        $c | Add-Member -NotePropertyName MonthlyCost -NotePropertyValue $cost -Force
+    }
+    $unusedMonthly = ($countedSkuRows | Where-Object { $null -ne $_.UnusedMonthlyCost } | Measure-Object UnusedMonthlyCost -Sum).Sum
+    if ($null -eq $unusedMonthly) { $unusedMonthly = 0 }
+    $reclaimMonthly = ($reclaimCandidates | Where-Object { $null -ne $_.MonthlyCost } | Measure-Object MonthlyCost -Sum).Sum
+    if ($null -eq $reclaimMonthly) { $reclaimMonthly = 0 }
+    $unpricedSkus = @($countedSkuRows | Where-Object { $null -eq $_.MonthlyPrice } | ForEach-Object { $_.Sku })
+    $costing = [ordered]@{
+        Currency           = $priceData.Currency
+        HasPrices          = ($pricedCount -gt 0)
+        PricedSkuCount     = $pricedCount
+        UnpricedSkuCount   = @($unpricedSkus).Count
+        UnpricedSkus       = $unpricedSkus
+        UnusedSeatsMonthly = [math]::Round($unusedMonthly, 2)
+        UnusedSeatsAnnual  = [math]::Round($unusedMonthly * 12, 2)
+        ReclaimableMonthly = [math]::Round($reclaimMonthly, 2)
+        ReclaimableAnnual  = [math]::Round($reclaimMonthly * 12, 2)
+    }
+    $cur = $priceData.Currency
+    if ($costing.HasPrices) {
+        Write-Host ("  IN MONEY: {0}{1:N0}/mo in unassigned seats ({0}{2:N0}/yr); {0}{3:N0}/mo reclaimable from disabled/stale accounts ({0}{4:N0}/yr)." -f `
+            $cur, $costing.UnusedSeatsMonthly, $costing.UnusedSeatsAnnual, $costing.ReclaimableMonthly, $costing.ReclaimableAnnual)
+        if ($costing.UnpricedSkuCount -gt 0) {
+            Write-Host ("  ({0} SKU(s) have no price yet: {1})" -f $costing.UnpricedSkuCount, ($unpricedSkus -join ', '))
+        }
+    } else {
+        Write-Host "  Price list found but no prices set yet - add per-seat prices to $PriceList and re-run for dollar figures."
+    }
+} else {
+    Write-Host '  Multiply by your per-seat prices for the renewal conversation (or pass -PriceList for the dollars).'
+}
 Write-Host '================================================================='
 Write-Host ''
 
@@ -195,6 +294,7 @@ $result = [pscustomobject]@{
     SkuSummary        = $countedSkuRows
     ConsumptionSkus   = $consumptionSkuRows
     ReclaimCandidates = $reclaimCandidates
+    Costing           = $costing
 }
 
 if ($JsonPath) {

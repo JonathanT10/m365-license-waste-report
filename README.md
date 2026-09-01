@@ -31,6 +31,26 @@ One read-only PowerShell script that finds the Microsoft 365 license spend you c
 
 The script prints the summary, returns a structured object (pipe it wherever), and `-CsvPath` exports the per-user reclaim candidates for the renewal conversation with your reseller.
 
+## Put a dollar figure on it
+
+Hand it a price list and it does the multiplication for you:
+
+```powershell
+.\Get-LicenseWasteReport.ps1 -PriceList .\prices.ini -JsonPath .\licensing.json
+```
+
+`prices.ini` is per-seat **monthly** prices keyed by the SKU part number the report already prints (copy `prices.example.ini` to start):
+
+```ini
+[settings]
+currency = $
+[prices]
+SPB            = 33.00
+AAD_PREMIUM_P2 = 9.00
+```
+
+You get two numbers: money sitting in **unassigned seats**, and money tied up in the licenses that **disabled or stale accounts** still hold (reclaimable now) — each as a monthly and an annual figure. Only the SKUs you price get a dollar figure; the rest keep showing seat counts. Skip `-PriceList` and nothing about money appears. (In the full suite you don't usually edit this file by hand — after your first refresh, the console lists your tenant's real SKUs in `prices.ini` for you to fill in.)
+
 ## Setup
 
 ```powershell
